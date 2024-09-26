@@ -1,0 +1,181 @@
+---
+- hosts: all
+  become: true
+  become_user: root
+  gather_facts: yes
+  remote_user: "{{ remote_user }}"
+  vars:
+       jvm_options: "{{ ((ansible_facts.memtotal_mb / 1024) * 0.5) | round | int }}" 
+  vars_prompt:
+    - name: password_input
+      prompt: "Enter desired Graylog admin Password"
+      private: no
+
+  tasks:
+
+   - name: Installing some needed packages...
+     apt:
+       pkg:
+       - curl
+       - gnupg
+       - mlocate
+       - xz-utils
+       - net-tools
+       update_cache: yes
+
+   - name: Importing Mongo GPG key...
+     apt_key:
+      url: https://www.mongodb.org/static/pgp/server-7.0.asc
+      state: present
+ 
+   - name: Adding Mongo repo...
+     apt_repository:
+      repo: "deb https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse"
+      state: present
+
+   - name: Installing Mongo 7...
+     apt:
+      name: mongodb-org
+      update_cache: yes
+
+   - name: Starting and enabling Mongo...
+     systemd_service:
+      state: started
+      name: mongod
+      enabled: true
+
+   - name: Importing Opensearch GPG key...
+     apt_key:
+      url: https://artifacts.opensearch.org/publickeys/opensearch.pgp
+      state: present
+
+   - name: Adding Opensearch repo...
+     apt_repository:
+      repo: "deb https://artifacts.opensearch.org/releases/bundle/opensearch/2.x/apt stable main"
+      state: present
+
+   - name: create random but idempotent password for Opensearch installer...
+     ansible.builtin.set_fact:
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: "{{ lookup('ansible.builtin.password', '/dev/null', seed=inventory_hostname) }}"
+
+   - name: Installing Opensearch 2.15...
+     apt:
+      name: opensearch=2.15.0
+      state: present
+     environment: 
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: "{{ OPENSEARCH_INITIAL_ADMIN_PASSWORD }}"
+
+   - name: Holding Opensearch to version 2.15...
+     dpkg_selections:
+      name: opensearch
+      selection: hold
+
+   - name: Copying in new opensearch.yml...
+     template:
+      src: templates/opensearch.yml.j2
+      dest: /etc/opensearch/opensearch.yml
+      owner: opensearch
+      group: opensearch
+      mode: 0640
+      backup: yes
+     register: opensearch_yml
+
+   - name: This is now much ram that will be put in cfg file..
+     debug:
+      msg: "{{jvm_options }}"
+
+   - name: Changing Xms settings...
+     lineinfile:
+      path: /etc/opensearch/jvm.options
+      search_string: Xms1g
+      line:  "-Xms{{ jvm_options }}g"
+      owner: opensearch
+      group: opensearch
+      mode: 0640
+      backup: yes
+     register: jvm_file1    
+
+   - name: Changing Xmx settings...
+     lineinfile:
+      path: /etc/opensearch/jvm.options
+      search_string: Xmx1g
+      line:  "-Xmx{{ jvm_options }}g"
+      owner: opensearch
+      group: opensearch
+      mode: 0640
+      backup: yes
+     register: jvm_file2
+
+   - name: Adding sysctl options...
+     sysctl:
+      name: vm.max_map_count
+      value: '262144'
+      sysctl_set: true
+      state: present
+      reload: true
+
+   - name: Enabling and starting Opensearch...
+     systemd_service:
+      name: opensearch
+      state: restarted
+      daemon_reload: true
+      enabled: true
+     when: (opensearch_yml.changed) or (jvm_file1.changed) or (jvm_file2.changed)
+
+   - name: Adding Greylog repo...
+     apt:
+      deb: https://packages.graylog2.org/repo/packages/graylog-6.0-repository_latest.deb
+      state: present
+      
+   - name: Installing greylog-server...
+     apt:
+      name: graylog-server
+      state: present
+      update_cache: yes
+
+   - name: Holding Greylog to version 6.0...
+     dpkg_selections:
+      name: greylog-server
+      selection: hold
+
+   - name: create random but idempotent password for Greylog password_secret...
+     ansible.builtin.set_fact:
+      password_secret: "{{ lookup('ansible.builtin.password', '/dev/null', seed=inventory_hostname, length=64) }}"
+
+   - name: Hash the admin password...
+     shell: echo -n "{{ password_input }}" | sha256sum | cut -d" " -f1
+     register: root_password_sha2
+
+#   - name: Show the hashed password
+#     debug:
+#      msg: "The hashed password is: {{ root_password_sha2.stdout }}"
+
+#   - name: The password_secret is...
+#     debug:
+#      msg: "{{ password_secret }}"
+
+#   - name: The root_password_sha2 is...
+#     debug:
+#      msg: "{{ root_password_sha2.stdout }}"
+
+   - name: Copying in Greylog cfg file...
+     template:
+      src: templates/greylog-server.conf.j2
+      dest: /etc/graylog/server/server.conf
+      owner: root
+      group: root
+      mode: 0644
+      backup: yes
+     register: greylog_cfg
+
+   - name: The binding IP address is...
+     debug:
+      msg: "{{ ansible_default_ipv4.address }}"
+
+   - name: Enabling and restarting Greylog server...
+     systemd_service:
+      name: graylog-server
+      state: restarted
+      daemon_reload: true
+      enabled: true
+     when: greylog_cfg.changed
