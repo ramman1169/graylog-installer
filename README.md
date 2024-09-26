@@ -15,8 +15,7 @@ sets correct values in cfg files for both Opensearch and Graylog
 
 Variables:
 
-cluster_name= this will be the name of the cluster if you choose to create one
-remote-user=this is the local user that has to run sudo to install $things
+cluster_name= this will be the name of the cluster if you choose to create one / remote-user=this is the local user that has to run sudo to install $things
 
 
 Syntax:
